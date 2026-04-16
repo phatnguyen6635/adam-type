@@ -174,8 +174,7 @@ class FractionalSGDAdaptiveMomentum(Optimizer):
                 fractional_alpha=fractional_alpha,
                 delta=delta,
             )
-
-            # ghi ngược state
+            
             for p, buf, prev_p in zip(params_with_grad, momentum_buffer_list, prev_param_list):
                 state = self.state[p]
                 state["momentum_buffer"] = buf
