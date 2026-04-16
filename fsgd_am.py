@@ -3,11 +3,10 @@ from torch import Tensor
 from typing import Callable, List, Optional
 from torch.optim import Optimizer
 
+import math
+
 
 def compute_momentum(iter_step: int) -> float:
-    """
-    Giữ nguyên schedule momentum như code cũ của bạn.
-    """
     b = 0.9
     a = 1000
     if iter_step <= 10000:
@@ -16,7 +15,6 @@ def compute_momentum(iter_step: int) -> float:
         return b - 2 * (0.9 * 0.999999 ** (15 * a) - b) + iter_step / (5 * a) * (0.9 * 0.999999 ** (15 * a) - b)
     else:
         return 0.9 * 0.999999 ** iter_step
-
 
 def fractional_sgd(
     params: List[Tensor],
@@ -31,32 +29,33 @@ def fractional_sgd(
     delta: float,
 ):
     """
-    Functional API cho Algorithm 2:
+    Functional API for Algorithm 2:
 
-        v_{t+1} = mu_t * v_t + grad(w_t) * (|w_t - w_{t-1}| + delta)^(1 - alpha)
+        v_{t+1} = mu_t * v_t + grad(w_t) * (|w_t - w_{t-1}| + delta)^(1 - alpha) / Γ(2 - alpha)
         w_{t+1} = w_t - lr * (v_{t+1} + weight_decay * w_t)
 
     Note:
-    - factor được tính elementwise theo tensor.
-    - prev_param_list lưu w_{t-1} cho từng parameter.
+    - factor is calculated elementwise with tensor.
+    - prev_param_list store w_{t-1} for each parameter.
     """
     eps_power = 1.0 - fractional_alpha
-
+    gamma_val = math.gamma(2 - fractional_alpha)  # Γ(2-α)
+    
     for i, param in enumerate(params):
         grad = grads[i]
 
         # fractional factor: (|w_t - w_{t-1}| + delta)^(1 - alpha)
         prev_param = prev_param_list[i]
         if prev_param is None:
-            # lần đầu: coi w_{t-1} = w_t
+            # Frist use w_{t-1} = w_t
             prev_param = param.detach().clone()
             prev_param_list[i] = prev_param
 
         frac_factor = (torch.abs(param - prev_param) + delta).pow(eps_power)
 
-        # cập nhật momentum buffer
+        # Update momentum buffer
         buf = momentum_buffer_list[i]
-        scaled_grad = grad * frac_factor
+        scaled_grad = grad * frac_factor / gamma_val
 
         if buf is None:
             buf = scaled_grad.detach().clone()
@@ -64,14 +63,14 @@ def fractional_sgd(
         else:
             buf.mul_(momentum).add_(scaled_grad)
 
-        # update tham số: w = w - lr * (v + λw)
+        # update parameters: w = w - lr * (v + λw)
         if weight_decay != 0:
             param.add_(buf, alpha=-lr)
             param.add_(param, alpha=-lr * weight_decay)
         else:
             param.add_(buf, alpha=-lr)
 
-        # cập nhật w_{t-1} cho bước sau
+        # Update w_{t-1} for next step
         prev_param.copy_(param.detach())
 
 
@@ -81,8 +80,8 @@ class FractionalSGDAdaptiveMomentum(Optimizer):
         params,
         lr: float = 0.001,
         momentum: float = 0.9,
-        weight_decay: float = 0.0,
-        fractional_alpha: float = 0.5,
+        weight_decay: float = 5e-4,
+        fractional_alpha: float = 0.999,
         delta: float = 1e-8,
         momentum_schedule: Optional[Callable[[int], float]] = None,
     ):
@@ -128,9 +127,7 @@ class FractionalSGDAdaptiveMomentum(Optimizer):
             fractional_alpha = group["fractional_alpha"]
             delta = group["delta"]
 
-            # momentum_t: nếu có schedule thì dùng schedule, không thì dùng momentum cố định
             if group["momentum_schedule"] is not None:
-                # lấy step lớn nhất trong group để đồng bộ
                 group_step = 0
                 for p in group["params"]:
                     state = self.state[p]
