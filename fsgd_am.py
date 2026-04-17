@@ -2,7 +2,6 @@ import torch
 from torch import Tensor
 from typing import Callable, List, Optional
 from torch.optim import Optimizer
-
 import math
 
 
@@ -16,6 +15,7 @@ def compute_momentum(iter_step: int) -> float:
     else:
         return 0.9 * 0.999999 ** iter_step
 
+
 def fractional_sgd(
     params: List[Tensor],
     grads: List[Tensor],
@@ -28,50 +28,37 @@ def fractional_sgd(
     fractional_alpha: float,
     delta: float,
 ):
-    """
-    Functional API for Algorithm 2:
-
-        v_{t+1} = mu_t * v_t + grad(w_t) * (|w_t - w_{t-1}| + delta)^(1 - alpha) / Γ(2 - alpha)
-        w_{t+1} = w_t - lr * (v_{t+1} + weight_decay * w_t)
-
-    Note:
-    - factor is calculated elementwise with tensor.
-    - prev_param_list store w_{t-1} for each parameter.
-    """
     eps_power = 1.0 - fractional_alpha
-    gamma_val = math.gamma(2 - fractional_alpha)  # Γ(2-α)
-    
+    gamma_val = math.gamma(2 - fractional_alpha)
+
     for i, param in enumerate(params):
         grad = grads[i]
 
-        # fractional factor: (|w_t - w_{t-1}| + delta)^(1 - alpha)
         prev_param = prev_param_list[i]
-        if prev_param is None:
-            # Frist use w_{t-1} = w_t
-            prev_param = param.detach().clone()
-            prev_param_list[i] = prev_param
 
-        frac_factor = (torch.abs(param - prev_param) + delta).pow(eps_power)
+        # snapshot w_t BEFORE update
+        current_param = param.detach().clone()
 
-        # Update momentum buffer
-        buf = momentum_buffer_list[i]
+        # fractional factor uses w_t and w_{t-1}
+        frac_factor = (torch.abs(current_param - prev_param) + delta).pow(eps_power)
         scaled_grad = grad * frac_factor / gamma_val
 
+        buf = momentum_buffer_list[i]
         if buf is None:
             buf = scaled_grad.detach().clone()
             momentum_buffer_list[i] = buf
         else:
             buf.mul_(momentum).add_(scaled_grad)
 
-        # update parameters: w = w - lr * (v + λw)
+        # paper-style update: w_{t+1} = w_t - lr * (v_{t+1} + wd * w_t)
+        update = buf
         if weight_decay != 0:
-            param.add_(buf, alpha=-lr)
-            param.add_(param, alpha=-lr * weight_decay)
-        else:
-            param.add_(buf, alpha=-lr)
+            update = update.add(current_param, alpha=weight_decay)
 
-        # Update w_{t-1} for next step
-        prev_param.copy_(param.detach())
+        param.add_(update, alpha=-lr)
+
+        # store w_t for next step
+        prev_param.copy_(current_param)
 
 
 class FractionalSGDAdaptiveMomentum(Optimizer):
@@ -83,7 +70,7 @@ class FractionalSGDAdaptiveMomentum(Optimizer):
         weight_decay: float = 5e-4,
         fractional_alpha: float = 0.999,
         delta: float = 1e-8,
-        momentum_schedule: Optional[Callable[[int], float]] = None,
+        momentum_schedule: Optional[Callable[[int], float]] = compute_momentum,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -106,9 +93,6 @@ class FractionalSGDAdaptiveMomentum(Optimizer):
         )
         super().__init__(params, defaults)
 
-    def __setstate__(self, state):
-        super().__setstate__(state)
-
     @torch.no_grad()
     def step(self, closure=None):
         loss = None
@@ -127,13 +111,14 @@ class FractionalSGDAdaptiveMomentum(Optimizer):
             fractional_alpha = group["fractional_alpha"]
             delta = group["delta"]
 
+            # one step per param group, not max over params
+            if "step" not in group:
+                group["step"] = 0
+            group["step"] += 1
+            current_step = group["step"]
+
             if group["momentum_schedule"] is not None:
-                group_step = 0
-                for p in group["params"]:
-                    state = self.state[p]
-                    if len(state) > 0:
-                        group_step = max(group_step, state.get("step", 0))
-                momentum_t = float(group["momentum_schedule"](group_step + 1))
+                momentum_t = float(group["momentum_schedule"](current_step))
             else:
                 momentum_t = float(group["momentum"])
 
@@ -146,16 +131,8 @@ class FractionalSGDAdaptiveMomentum(Optimizer):
 
                 state = self.state[p]
                 if len(state) == 0:
-                    state["step"] = 0
                     state["momentum_buffer"] = None
                     state["prev_param"] = p.detach().clone()
-                else:
-                    if "momentum_buffer" not in state:
-                        state["momentum_buffer"] = None
-                    if "prev_param" not in state:
-                        state["prev_param"] = p.detach().clone()
-
-                state["step"] += 1
 
                 momentum_buffer_list.append(state["momentum_buffer"])
                 prev_param_list.append(state["prev_param"])
@@ -174,7 +151,7 @@ class FractionalSGDAdaptiveMomentum(Optimizer):
                 fractional_alpha=fractional_alpha,
                 delta=delta,
             )
-            
+
             for p, buf, prev_p in zip(params_with_grad, momentum_buffer_list, prev_param_list):
                 state = self.state[p]
                 state["momentum_buffer"] = buf

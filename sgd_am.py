@@ -1,187 +1,125 @@
 import torch
 from torch import Tensor
-from typing import Callable, List, Optional
+from typing import Optional, List
 from torch.optim import Optimizer
 
 
-def compute_momentum(iter_step: int) -> float:
-    """
-    Giữ nguyên schedule momentum như code cũ của bạn.
-    """
-    b = 0.9
-    a = 1000
-    if iter_step <= 10000:
-        return b * iter_step / 10000
-    elif iter_step <= 15000:
-        return b - 2 * (0.9 * 0.999999 ** (15 * a) - b) + iter_step / (5 * a) * (0.9 * 0.999999 ** (15 * a) - b)
-    else:
-        return 0.9 * 0.999999 ** iter_step
-
-
-def fractional_sgd(
-    params: List[Tensor],
-    grads: List[Tensor],
-    momentum_buffer_list: List[Optional[Tensor]],
-    prev_param_list: List[Optional[Tensor]],
-    *,
-    lr: float,
-    weight_decay: float,
-    momentum: float,
-    fractional_alpha: float,
-    delta: float,
-):
-    """
-    Functional API cho Algorithm 2:
-
-        v_{t+1} = mu_t * v_t + grad(w_t) * (|w_t - w_{t-1}| + delta)^(1 - alpha)
-        w_{t+1} = w_t - lr * (v_{t+1} + weight_decay * w_t)
-
-    Note:
-    - factor được tính elementwise theo tensor.
-    - prev_param_list lưu w_{t-1} cho từng parameter.
-    """
-    eps_power = 1.0 - fractional_alpha
-
-    for i, param in enumerate(params):
-        grad = grads[i]
-
-        # fractional factor: (|w_t - w_{t-1}| + delta)^(1 - alpha)
-        prev_param = prev_param_list[i]
-        if prev_param is None:
-            # lần đầu: coi w_{t-1} = w_t
-            prev_param = param.detach().clone()
-            prev_param_list[i] = prev_param
-
-        frac_factor = (torch.abs(param - prev_param) + delta).pow(eps_power)
-
-        # cập nhật momentum buffer
-        buf = momentum_buffer_list[i]
-        scaled_grad = grad * frac_factor
-
-        if buf is None:
-            buf = scaled_grad.detach().clone()
-            momentum_buffer_list[i] = buf
-        else:
-            buf.mul_(momentum).add_(scaled_grad)
-
-        # update tham số: w = w - lr * (v + λw)
-        if weight_decay != 0:
-            param.add_(buf, alpha=-lr)
-            param.add_(param, alpha=-lr * weight_decay)
-        else:
-            param.add_(buf, alpha=-lr)
-
-        # cập nhật w_{t-1} cho bước sau
-        prev_param.copy_(param.detach())
-
-
-class FractionalSGDAdaptiveMomentum(Optimizer):
-    def __init__(
-        self,
-        params,
-        lr: float = 0.001,
-        momentum: float = 0.9,
-        weight_decay: float = 0.0,
-        fractional_alpha: float = 0.5,
-        delta: float = 1e-8,
-        momentum_schedule: Optional[Callable[[int], float]] = None,
-    ):
+class SGDAdaptiveMomentum(Optimizer):
+    def __init__(self, params, lr=0.001, momentum=0, dampening=0,
+                 weight_decay=0, nesterov=False):
         if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}")
+            raise ValueError("Invalid learning rate: {}".format(lr))
         if momentum < 0.0:
-            raise ValueError(f"Invalid momentum value: {momentum}")
+            raise ValueError("Invalid momentum value: {}".format(momentum))
         if weight_decay < 0.0:
-            raise ValueError(f"Invalid weight_decay value: {weight_decay}")
-        if not (0.0 <= fractional_alpha < 1.0):
-            raise ValueError(f"fractional_alpha must be in [0, 1), got {fractional_alpha}")
-        if delta < 0.0:
-            raise ValueError(f"delta must be non-negative, got {delta}")
+            raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
 
-        defaults = dict(
-            lr=lr,
-            momentum=momentum,
-            weight_decay=weight_decay,
-            fractional_alpha=fractional_alpha,
-            delta=delta,
-            momentum_schedule=momentum_schedule,
-        )
-        super().__init__(params, defaults)
+        defaults = dict(lr=lr, momentum=momentum, dampening=dampening,
+                        weight_decay=weight_decay, nesterov=nesterov)
+        if nesterov and (momentum <= 0 or dampening != 0):
+            raise ValueError("Nesterov momentum requires a momentum and zero dampening")
+        super(SGDAdaptiveMomentum, self).__init__(params, defaults)
 
     def __setstate__(self, state):
-        super().__setstate__(state)
+        super(SGDAdaptiveMomentum, self).__setstate__(state)
+        for group in self.param_groups:
+            group.setdefault('nesterov', False)
 
     @torch.no_grad()
     def step(self, closure=None):
+        """Performs a single optimization step.
+
+        Args:
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
+        # group['momentum'] *= 0.999999
         for group in self.param_groups:
             params_with_grad = []
-            grads = []
+            d_p_list = []
             momentum_buffer_list = []
-            prev_param_list = []
+            weight_decay = group['weight_decay']
+            momentum = group['momentum']
+            dampening = group['dampening']
+            nesterov = group['nesterov']
+            lr = group['lr']
+            for p in group['params']:
+                if p.grad is not None:
+                    params_with_grad.append(p)
+                    d_p_list.append(p.grad)
 
-            lr = group["lr"]
-            weight_decay = group["weight_decay"]
-            fractional_alpha = group["fractional_alpha"]
-            delta = group["delta"]
-
-            # momentum_t: nếu có schedule thì dùng schedule, không thì dùng momentum cố định
-            if group["momentum_schedule"] is not None:
-                # lấy step lớn nhất trong group để đồng bộ
-                group_step = 0
-                for p in group["params"]:
                     state = self.state[p]
-                    if len(state) > 0:
-                        group_step = max(group_step, state.get("step", 0))
-                momentum_t = float(group["momentum_schedule"](group_step + 1))
-            else:
-                momentum_t = float(group["momentum"])
-
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-
-                params_with_grad.append(p)
-                grads.append(p.grad)
-
-                state = self.state[p]
-                if len(state) == 0:
-                    state["step"] = 0
-                    state["momentum_buffer"] = None
-                    state["prev_param"] = p.detach().clone()
-                else:
-                    if "momentum_buffer" not in state:
-                        state["momentum_buffer"] = None
-                    if "prev_param" not in state:
-                        state["prev_param"] = p.detach().clone()
-
+                    if len(state) == 0:
+                        state["step"] = 0
+                    if 'momentum_buffer' not in state:
+                        momentum_buffer_list.append(None)
+                    else:
+                        momentum_buffer_list.append(state['momentum_buffer'])
                 state["step"] += 1
+            sgd(params_with_grad,
+                  d_p_list,
+                  momentum_buffer_list,
+                  weight_decay=weight_decay,
+                  momentum=compute_momentum(state["step"]),
+                  lr=lr,
+                  dampening=dampening,
+                  nesterov=nesterov)
 
-                momentum_buffer_list.append(state["momentum_buffer"])
-                prev_param_list.append(state["prev_param"])
-
-            if len(params_with_grad) == 0:
-                continue
-
-            fractional_sgd(
-                params_with_grad,
-                grads,
-                momentum_buffer_list,
-                prev_param_list,
-                lr=lr,
-                weight_decay=weight_decay,
-                momentum=momentum_t,
-                fractional_alpha=fractional_alpha,
-                delta=delta,
-            )
-
-            # ghi ngược state
-            for p, buf, prev_p in zip(params_with_grad, momentum_buffer_list, prev_param_list):
+            # update momentum_buffers in state
+            for p, momentum_buffer in zip(params_with_grad, momentum_buffer_list):
                 state = self.state[p]
-                state["momentum_buffer"] = buf
-                state["prev_param"] = prev_p
+                state['momentum_buffer'] = momentum_buffer
 
         return loss
+
+def sgd(params: List[Tensor],
+        d_p_list: List[Tensor],
+        momentum_buffer_list: List[Optional[Tensor]],
+        *,
+        weight_decay: float,
+        momentum: float,
+        lr: float,
+        dampening: float,
+        nesterov: bool):
+    r"""Functional API that performs SGD algorithm computation.
+
+    See :class:`~torch.optim.SGD` for details.
+    """
+
+    for i, param in enumerate(params):
+
+        d_p = d_p_list[i]
+        if weight_decay != 0:
+            d_p = d_p.add(param, alpha=weight_decay)
+
+        if momentum != 0:
+            buf = momentum_buffer_list[i]
+
+            if buf is None:
+                buf = torch.clone(d_p).detach()
+                momentum_buffer_list[i] = buf
+            else:
+                buf.mul_(momentum).add_(d_p, alpha=1 - dampening)
+
+            if nesterov:
+                d_p = d_p.add(buf, alpha=momentum)
+            else:
+                d_p = buf
+
+        param.add_(d_p, alpha=-lr)
+
+
+def compute_momentum(iter):
+    b = 0.9
+    a = 1000
+    if iter <= 10000:
+        return b * iter/ 10000
+    elif iter > 10000 and iter <= 15000:
+        return b - 2*(0.9 * 0.999999**(15*a) - b) + iter/(5*a)*(0.9*0.999999**(15*a) - b)
+    else:
+        return 0.9 * 0.999999**iter
