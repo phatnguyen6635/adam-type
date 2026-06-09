@@ -4,18 +4,17 @@ from typing import Callable, List, Optional
 from torch.optim import Optimizer
 import math
 
-
 def compute_momentum(iter_step: int) -> float:
     b = 0.9
     a = 1000
+    delta = b * 0.999999 ** (15 * a) - b
     if iter_step <= 10000:
         return b * iter_step / 10000
     elif iter_step <= 15000:
-        return b - 2 * (0.9 * 0.999999 ** (15 * a) - b) + iter_step / (5 * a) * (0.9 * 0.999999 ** (15 * a) - b)
+        return b - 2 * delta + iter_step / (5 * a) * delta
     else:
         return 0.9 * 0.999999 ** iter_step
-
-
+    
 def fractional_oder_sgd(
     params: List[Tensor],
     grads: List[Tensor],
@@ -78,7 +77,7 @@ class FractionalOrderSGDAdaptiveMomentum(Optimizer):
             raise ValueError(f"Invalid momentum value: {momentum}")
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
-        if not (0.0 <= fractional_alpha < 1.0):
+        if not (0.0 <= fractional_alpha <= 1.001 ):
             raise ValueError(f"fractional_alpha must be in [0, 1), got {fractional_alpha}")
         if delta < 0.0:
             raise ValueError(f"delta must be non-negative, got {delta}")
