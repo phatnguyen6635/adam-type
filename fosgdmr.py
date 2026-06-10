@@ -56,7 +56,7 @@ class FractionalOrderSGDMomentum(Optimizer):
         params,
         lr: float = 0.1,
         lambda_: float = 5e-4,
-        alpha: float = 0.999,
+        fractional_alpha: float = 0.999,
         delta: float = 1e-8,
         beta: float = 0.99
     ):
@@ -64,8 +64,8 @@ class FractionalOrderSGDMomentum(Optimizer):
             raise ValueError(f"Invalid learning rate mu: {lr}")
         if lambda_ < 0.0:
             raise ValueError(f"Invalid weight_decay lambda_: {lambda_}")
-        if not (0.0 <= alpha < 1.0):
-            raise ValueError(f"alpha must be in [0, 1), got {alpha}")
+        if not (0.0 < fractional_alpha <= 1.001):
+            raise ValueError(f"alpha must be in (0, 1.001], got {fractional_alpha}")
         if delta < 0.0:
             raise ValueError(f"delta must be non-negative, got {delta}")
         if not (0.0 <= beta < 1.0):
@@ -74,7 +74,7 @@ class FractionalOrderSGDMomentum(Optimizer):
         defaults = dict(
             lr=lr,
             lambda_=lambda_,
-            alpha=alpha,
+            alpha=fractional_alpha,
             delta=delta,
             beta=beta
         )

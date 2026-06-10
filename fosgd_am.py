@@ -78,7 +78,7 @@ class FractionalOrderSGDAdaptiveMomentum(Optimizer):
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
         if not (0.0 <= fractional_alpha <= 1.001 ):
-            raise ValueError(f"fractional_alpha must be in [0, 1), got {fractional_alpha}")
+            raise ValueError(f"fractional_alpha must be in (0, 1.001], got {fractional_alpha}")
         if delta < 0.0:
             raise ValueError(f"delta must be non-negative, got {delta}")
 

@@ -3,9 +3,5 @@ name = "adam-type"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.9"
-dependencies = [
-    "matplotlib>=3.9.4",
-    "torch>=2.8.0",
-    "torchvision>=0.23.0",
-]
+requires-python = ">=3.11"
+dependencies = []
