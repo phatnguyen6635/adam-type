@@ -12,6 +12,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
 
+from torch.optim import SGD
 from fosgd_am import FractionalOrderSGDAdaptiveMomentum
 from fosgdmr import FractionalOrderSGDMomentum
 
@@ -26,25 +27,28 @@ NUM_EPOCH = 200
 BATCH_SIZE = 128
 NUM_WORKERS = 16
 
-ALPHAS = [0.9, 0.99, 0.999, 1.001]
+ALPHAS = [0.9]
 MODEL_NAMES = ["resnet34"]
-OPTIMIZER_NAMES = ["fosgd_am"]
+OPTIMIZER_NAMES = ["sgdm"]
 SEEDS = [0, 1, 2]
 
 OUTPUT_DIR = Path("outputs")
 RUN_DIR = OUTPUT_DIR / "runs"
 SUMMARY_PATH = OUTPUT_DIR / "summary_all.json"
 
+
 TRAIN_TRANSFORM = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.RandomCrop(32, padding=4),
     transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
     transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
+    transforms.RandomRotation(10),
+    transforms.Normalize(
+        (0.4914, 0.4822, 0.4465),
+        (0.2470, 0.2435, 0.2616)
+    )
 ])
 
 VAL_TRANSFORM = transforms.Compose([
-    transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
 ])
@@ -133,7 +137,17 @@ def build_model(model_name: str, num_classes: int):
 
     if name == "resnet34":
         model = models.resnet34(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
+
+        model.conv1 = nn.Conv2d(
+            3, 64,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False
+        )
+
+        model.maxpool = nn.Identity()
+        model.fc = nn.Linear(model.fc.in_features, 10)
 
     elif name == "densenet121":
         model = models.densenet121(weights=None)
@@ -162,7 +176,14 @@ def build_optimizer(optimizer_name: str, params, alpha: float):
             return FractionalOrderSGDMomentum(params, fractional_alpha=alpha)
         except TypeError:
             return FractionalOrderSGDMomentum(params)
-        
+    elif name == "sgdm":
+        return SGD(
+                params,
+                lr=0.1,
+                momentum=0.9,
+                weight_decay=5e-4
+            )
+
     else:
         raise ValueError(f"Optimizer not supported: {optimizer_name}")
 
