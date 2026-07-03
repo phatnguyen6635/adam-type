@@ -15,7 +15,7 @@ from torchvision import datasets, models, transforms
 from torch.optim import SGD
 from fosgd_am import FractionalOrderSGDAdaptiveMomentum
 from fosgdmr import FractionalOrderSGDMomentum
-
+from fosgdr import FractionalOrderSGD
 
 # =============================
 # Config
@@ -27,9 +27,9 @@ NUM_EPOCH = 200
 BATCH_SIZE = 128
 NUM_WORKERS = 16
 
-ALPHAS = [0.9]
-MODEL_NAMES = ["resnet34"]
-OPTIMIZER_NAMES = ["sgdm"]
+ALPHAS = [0.9, 0.99, 0.999, 1.001, 1.01, 1.1]
+MODEL_NAMES = ["densenet121"]
+OPTIMIZER_NAMES = ["fosgdr"]
 SEEDS = [0, 1, 2]
 
 OUTPUT_DIR = Path("outputs")
@@ -41,7 +41,7 @@ TRAIN_TRANSFORM = transforms.Compose([
     transforms.RandomCrop(32, padding=4),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
-    transforms.RandomRotation(10),
+    transforms.RandomRotation(10),      
     transforms.Normalize(
         (0.4914, 0.4822, 0.4465),
         (0.2470, 0.2435, 0.2616)
@@ -151,7 +151,22 @@ def build_model(model_name: str, num_classes: int):
 
     elif name == "densenet121":
         model = models.densenet121(weights=None)
-        model.classifier = nn.Linear(model.classifier.in_features, num_classes)
+
+        model.features.conv0 = nn.Conv2d(
+            3,
+            64,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+
+        model.features.pool0 = nn.Identity()
+
+        model.classifier = nn.Linear(
+            model.classifier.in_features,
+            num_classes
+        )
 
     else:
         raise ValueError(f"Unsupported model: {model_name}")
@@ -176,6 +191,12 @@ def build_optimizer(optimizer_name: str, params, alpha: float):
             return FractionalOrderSGDMomentum(params, fractional_alpha=alpha)
         except TypeError:
             return FractionalOrderSGDMomentum(params)
+    elif name == "fosgdr":
+        try:
+            return FractionalOrderSGD(params, fractional_alpha=alpha)
+        except TypeError:
+            return FractionalOrderSGD(params)
+
     elif name == "sgdm":
         return SGD(
                 params,
@@ -183,7 +204,8 @@ def build_optimizer(optimizer_name: str, params, alpha: float):
                 momentum=0.9,
                 weight_decay=5e-4
             )
-
+    elif name == "sgd":
+        return SGD(params, lr=0.1)
     else:
         raise ValueError(f"Optimizer not supported: {optimizer_name}")
 

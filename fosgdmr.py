@@ -5,6 +5,13 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
+def compute_linear_alpha(a: float, b: float, M:int, iter_step: int) -> float:
+    alpha = iter_step / M * (b - a) + a
+    return alpha
+
+def compute_exponential_alpha(a: float, b: float, M:int, iter_step: int) -> float:
+    alpha = a * (b / a) ** (iter_step / M)
+    return alpha
 
 def fractional_order_sgdm(
     params: List[Tensor],

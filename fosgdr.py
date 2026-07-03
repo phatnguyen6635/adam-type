@@ -54,8 +54,8 @@ class FractionalOrderSGD(Optimizer):
             raise ValueError(f"Invalid learning rate mu: {lr}")
         if lambda_ < 0.0:
             raise ValueError(f"Invalid weight_decay lambda_: {lambda_}")
-        if not (0.0 < fractional_alpha <= 1.001):
-            raise ValueError(f"alpha must be in (0, 1.001], got {fractional_alpha}")
+        if not (0.0 < fractional_alpha <= 1.1):
+            raise ValueError(f"alpha must be in (0, 1.1], got {fractional_alpha}")
         if delta < 0.0:
             raise ValueError(f"delta must be non-negative, got {delta}")
 
