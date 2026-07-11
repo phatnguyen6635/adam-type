@@ -27,9 +27,9 @@ NUM_EPOCH = 200
 BATCH_SIZE = 128
 NUM_WORKERS = 16
 
-ALPHAS = [0.9, 0.99, 0.999, 1.001, 1.01, 1.1]
+ALPHAS = [0.9, 0.99, 0.999, 1.001]
 MODEL_NAMES = ["densenet121"]
-OPTIMIZER_NAMES = ["fosgdr"]
+OPTIMIZER_NAMES = ["fosgdmr"]
 SEEDS = [0, 1, 2]
 
 OUTPUT_DIR = Path("outputs")
@@ -167,7 +167,6 @@ def build_model(model_name: str, num_classes: int):
             model.classifier.in_features,
             num_classes
         )
-
     else:
         raise ValueError(f"Unsupported model: {model_name}")
 
