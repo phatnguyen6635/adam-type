@@ -27,7 +27,7 @@ NUM_EPOCH = 200
 BATCH_SIZE = 128
 NUM_WORKERS = 16
 
-ALPHAS = [0.9, 0.99, 0.999, 1.001]
+ALPHAS = [0.999, 1.001]
 MODEL_NAMES = ["densenet121"]
 OPTIMIZER_NAMES = ["fosgdmr"]
 SEEDS = [0, 1, 2]
@@ -85,7 +85,7 @@ def seed_worker(worker_id: int):
 # =============================
 # Data
 # =============================
-def setup_dataloader(dataset_name: str, seed: int):
+def setup_dataloader(dataset_name: str, seed: int, use_cuda: bool):
     if dataset_name == "cifar10":
         train_dataset = datasets.CIFAR10(
             root="./data", train=True, download=True, transform=TRAIN_TRANSFORM
@@ -111,7 +111,7 @@ def setup_dataloader(dataset_name: str, seed: int):
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=NUM_WORKERS,
-        pin_memory=True,
+        pin_memory=use_cuda,
         worker_init_fn=seed_worker,
         generator=g
     )
@@ -121,7 +121,7 @@ def setup_dataloader(dataset_name: str, seed: int):
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,
-        pin_memory=True,
+        pin_memory=use_cuda,
         worker_init_fn=seed_worker,
         generator=g
     )
@@ -268,7 +268,9 @@ def evaluate(model, loader, criterion, device):
 # =============================
 def run_experiment(alpha: float, model_name: str, optimizer_name: str, seed: int, device):
     set_seed(seed)
-    train_loader, val_loader = setup_dataloader(DATASET_NAME, seed)
+    train_loader, val_loader = setup_dataloader(
+        DATASET_NAME, seed, use_cuda=device.type == "cuda"
+    )
 
     model = build_model(model_name, NUM_CLASSES).to(device)
     optimizer = build_optimizer(optimizer_name, model.parameters(), alpha=alpha)
@@ -339,6 +341,9 @@ def run_experiment(alpha: float, model_name: str, optimizer_name: str, seed: int
 # =============================
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    if device.type == "cpu":
+        print("CUDA is unavailable; training will run on CPU.")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
 
