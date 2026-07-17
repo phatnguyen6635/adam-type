@@ -16,6 +16,7 @@ from torch.optim import SGD
 from fosgd_am import FractionalOrderSGDAdaptiveMomentum
 from fosgdmr import FractionalOrderSGDMomentum
 from fosgdr import FractionalOrderSGD
+from fosgdmre import FractionalOrderSGDMomentumEnegry
 
 # =============================
 # Config
@@ -29,7 +30,7 @@ NUM_WORKERS = 16
 
 ALPHAS = [0.999, 1.001]
 MODEL_NAMES = ["densenet121"]
-OPTIMIZER_NAMES = ["fosgdmr"]
+OPTIMIZER_NAMES = ["fosgdmre"]
 SEEDS = [0, 1, 2]
 
 OUTPUT_DIR = Path("outputs")

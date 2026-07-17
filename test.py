@@ -1,176 +1,419 @@
-import math
-from typing import List, Optional
+import json
+import os
+import random
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, List, Any, Tuple
 
+import numpy as np
 import torch
-from torch import Tensor
-from torch.optim import Optimizer
+import torch.nn as nn
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
+from torchvision import datasets, models, transforms
 
-def compute_linear_alpha(a: float, b: float, M:int, iter_step: int) -> float:
-    alpha = iter_step / M * (b - a) + a
-    return alpha
+from torch.optim import SGD
+from fosgd_am import FractionalOrderSGDAdaptiveMomentum
+from fosgdmr import FractionalOrderSGDMomentum
+from fosgdr import FractionalOrderSGD
+from fosgdmrextra import FractionalOrderSGDMomentumExtra
 
-def compute_exponential_alpha(a: float, b: float, M:int, iter_step: int) -> float:
-    alpha = a * (b / a) ** (iter_step / M)
-    return alpha
+# =============================
+# Config
+# =============================
+DATASET_NAME = "cifar10"
+NUM_CLASSES = 10
 
-def fractional_order_sgdm(
-    params: List[Tensor],
-    grads: List[Tensor],
-    momentum_m_list: List[Optional[Tensor]],
-    prev_w_list: List[Optional[Tensor]],
-    *,
-    lr: float,
-    lambda_: float,
-    alpha: float,
-    delta: float,
-    beta: float
-):
-    eps_power = 1.0 - alpha
-    gamma_val = math.gamma(2.0 - alpha)
+NUM_EPOCH = 200
+BATCH_SIZE = 128
+NUM_WORKERS = 16
 
-    for i, w_k in enumerate(params):
-        grad_w_k = grads[i]
-        w_k_minus_1 = prev_w_list[i]
+ALPHAS = [0.9, 0.999]
+MODEL_NAMES = ["resnet34"]
+OPTIMIZER_NAMES = ["fosgdmrextra"]
+SEEDS = [0, 1]
 
-        # snapshot w_k before update
-        w_k_current = w_k.clone()
-
-        # g_k = ∇L(w_k) + λ w_k
-        g_k = grad_w_k + lambda_ * w_k_current
-
-        # m_k = β m_{k-1} + (1 - β) g_k
-        m_k = momentum_m_list[i]
-        if m_k is None:
-            m_k = (1.0 - beta) * g_k
-            momentum_m_list[i] = m_k
-        else:
-            m_k.mul_(beta).add_((1.0 - beta) * g_k)
-
-        # (|w_k - w_{k-1}| + δ)^(1-α)
-        frac_factor = (torch.abs(w_k_current - w_k_minus_1) + delta).pow(eps_power)
-
-        # w_{k+1} = w_k - μ * m_k * frac_factor / Γ(2-α)
-        scaled_grad = m_k * frac_factor / gamma_val
-        w_k.add_(scaled_grad, alpha=-lr)
-
-        # update w_{k-1} <- w_k (for next step)
-        w_k_minus_1.copy_(w_k_current)
+OUTPUT_DIR = Path("outputs")
+RUN_DIR = OUTPUT_DIR / "runs"
+SUMMARY_PATH = OUTPUT_DIR / "summary_all.json"
 
 
-class FractionalOrderSGDMomentum(Optimizer):
-    def __init__(
-        self,
-        params,
-        lr=0.1,
-        lambda_=5e-4,
+TRAIN_TRANSFORM = transforms.Compose([
+    transforms.RandomCrop(32, padding=4),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.RandomRotation(10),      
+    transforms.Normalize(
+        (0.4914, 0.4822, 0.4465),
+        (0.2470, 0.2435, 0.2616)
+    )
+])
 
-        alpha_start=0.6,
-        alpha_end=0.99,
+VAL_TRANSFORM = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
+])
 
-        max_iters=100000,
-        alpha_schedule="linear",
 
-        delta=1e-8,
-        beta=0.99,
-    ):
+# =============================
+# Seed
+# =============================
+def set_seed(seed: int = 42):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-        defaults = dict(
-            lr=lr,
-            lambda_=lambda_,
-            alpha_start=alpha_start,
-            alpha_end=alpha_end,
-            max_iters=max_iters,
-            alpha_schedule=alpha_schedule,
-            delta=delta,
-            beta=beta,
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
+
+
+def seed_worker(worker_id: int):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+# =============================
+# Data
+# =============================
+def setup_dataloader(dataset_name: str, seed: int, use_cuda: bool):
+    if dataset_name == "cifar10":
+        train_dataset = datasets.CIFAR10(
+            root="./data", train=True, download=True, transform=TRAIN_TRANSFORM
+        )
+        val_dataset = datasets.CIFAR10(
+            root="./data", train=False, download=True, transform=VAL_TRANSFORM
+        )
+    elif dataset_name == "cifar100":
+        train_dataset = datasets.CIFAR100(
+            root="./data", train=True, download=True, transform=TRAIN_TRANSFORM
+        )
+        val_dataset = datasets.CIFAR100(
+            root="./data", train=False, download=True, transform=VAL_TRANSFORM
+        )
+    else:
+        raise ValueError(f"{dataset_name} not supported")
+
+    g = torch.Generator()
+    g.manual_seed(seed)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=use_cuda,
+        worker_init_fn=seed_worker,
+        generator=g
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=use_cuda,
+        worker_init_fn=seed_worker,
+        generator=g
+    )
+
+    return train_loader, val_loader
+
+
+# =============================
+# Model
+# =============================
+def build_model(model_name: str, num_classes: int):
+    name = model_name.lower()
+
+    if name == "resnet34":
+        model = models.resnet34(weights=None)
+
+        model.conv1 = nn.Conv2d(
+            3, 64,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False
         )
 
-        super().__init__(params, defaults)
+        model.maxpool = nn.Identity()
+        model.fc = nn.Linear(model.fc.in_features, 10)
 
-        self.iter_step = 0
+    elif name == "densenet121":
+        model = models.densenet121(weights=None)
 
-    def _compute_alpha(self, group):
+        model.features.conv0 = nn.Conv2d(
+            3,
+            64,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
 
-        a = group["alpha_start"]
-        b = group["alpha_end"]
-        M = group["max_iters"]
+        model.features.pool0 = nn.Identity()
 
-        t = min(self.iter_step, M)
+        model.classifier = nn.Linear(
+            model.classifier.in_features,
+            num_classes
+        )
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
 
-        schedule = group["alpha_schedule"].lower()
+    return model
 
-        if schedule == "linear":
-            alpha = compute_linear_alpha(a, b, M, t)
 
-        elif schedule in ["exp", "exponential"]:
-            alpha = compute_exponential_alpha(a, b, M, t)
+# =============================
+# Optimizer
+# =============================
+def build_optimizer(optimizer_name: str, params):
+    name = optimizer_name.lower()
+    
+    if name == "fosgdmrextra":
+        return FractionalOrderSGDMomentumExtra(params,
+                                               fractional_alpha=ALPHAS[0],
+                                               alpha_mode="linear",      # None | "linear" | "exponential"
+                                               alpha_start=ALPHAS[0],
+                                               alpha_end=ALPHAS[1],
+                                               total_epochs=NUM_EPOCH,)
+    else:
+        raise ValueError(f"Optimizer not supported: {optimizer_name}")
 
-        else:
-            raise ValueError(f"Unknown alpha schedule: {schedule}")
 
-        return alpha
+# =============================
+# Train / Eval
+# =============================
+def train_one_epoch(epoch, model, loader, criterion, optimizer, device):
+    model.train()
 
-    @torch.no_grad()
-    def step(self, closure=None):
+    total_loss = 0.0
+    total_correct = 0
+    total = 0
 
-        loss = None
+    for batch_idx, (data, target) in enumerate(loader):
+        data = data.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
 
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
 
-        for group in self.param_groups:
+        total_loss += float(loss.item()) * data.size(0)
+        pred = output.argmax(dim=1)
+        total_correct += (pred == target).sum().item()
+        total += target.size(0)
 
-            params_with_grad = []
-            grads = []
-            momentum_m_list = []
-            prev_w_list = []
+        if batch_idx % 100 == 0:
+            print(f"  [Train] Batch {batch_idx}/{len(loader)} | Loss {loss.item():.4f}")
 
-            lr = group["lr"]
-            lambda_ = group["lambda_"]
-            delta = group["delta"]
-            beta = group["beta"]
 
-            alpha = self._compute_alpha(group)
+    return total_loss / total, 100.0 * total_correct / total
 
-            for w in group["params"]:
 
-                if w.grad is None:
-                    continue
+@torch.no_grad()
+def evaluate(model, loader, criterion, device):
+    model.eval()
 
-                params_with_grad.append(w)
-                grads.append(w.grad)
+    total_loss = 0.0
+    total_correct = 0
+    total = 0
 
-                state = self.state[w]
+    for data, target in loader:
+        data = data.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
 
-                if len(state) == 0:
-                    state["momentum_m"] = None
-                    state["prev_w"] = w.clone()
+        output = model(data)
+        loss = criterion(output, target)
 
-                momentum_m_list.append(state["momentum_m"])
-                prev_w_list.append(state["prev_w"])
+        total_loss += float(loss.item()) * data.size(0)
+        pred = output.argmax(dim=1)
+        total_correct += (pred == target).sum().item()
+        total += target.size(0)
 
-            if len(params_with_grad) == 0:
-                continue
+    return total_loss / total, 100.0 * total_correct / total
 
-            fractional_order_sgdm(
-                params=params_with_grad,
-                grads=grads,
-                momentum_m_list=momentum_m_list,
-                prev_w_list=prev_w_list,
-                lr=lr,
-                lambda_=lambda_,
-                alpha=alpha,
-                delta=delta,
-                beta=beta,
-            )
 
-            for w, m_k in zip(params_with_grad, momentum_m_list):
-                self.state[w]["momentum_m"] = m_k
+# =============================
+# Run 1 experiment
+# =============================
+def run_experiment(model_name: str, optimizer_name: str, seed: int, device):
+    set_seed(seed)
+    train_loader, val_loader = setup_dataloader(
+        DATASET_NAME, seed, use_cuda=device.type == "cuda"
+    )
 
-        self.iter_step += 1
+    model = build_model(model_name, NUM_CLASSES).to(device)
+    optimizer = build_optimizer(optimizer_name, model.parameters())
+    
+    scheduler = CosineAnnealingLR(
+    optimizer,
+    T_max=NUM_EPOCH,
+    eta_min=0
+    )
+    
+    criterion = nn.CrossEntropyLoss(reduction="mean")
 
-        return loss
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_loss": [],
+        "val_acc": [],
+        "lr": []
+    }
+    for epoch in range(NUM_EPOCH):
+        alpha = optimizer.update_alpha(epoch)
+        print(
+            f"\n=== Alpha={alpha} | Model={model_name} | Optimizer={optimizer_name} | Seed={seed} | Epoch {epoch+1}/{NUM_EPOCH} ==="
+        )
+
+        train_loss, train_acc = train_one_epoch(
+            epoch, model, train_loader, criterion, optimizer, device
+        )
+        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+
+        scheduler.step()
+        current_lr = optimizer.param_groups[0]["lr"]
+
+        history["train_loss"].append(float(train_loss))
+        history["train_acc"].append(float(train_acc))
+        history["val_loss"].append(float(val_loss))
+        history["val_acc"].append(float(val_acc))
+        history["lr"].append(float(current_lr))
+
+        print(
+            f"Epoch [{epoch+1}/{NUM_EPOCH}] | "
+            f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
+            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% | "
+            f"LR: {current_lr:.6f}"
+        )
+
+    run_record = {
+        "Alpha": alpha,
+        "Model": model_name,
+        "Seed": seed,
+        "Optimizer": optimizer_name,
+        "Train loss": history["train_loss"],
+        "Train accuracy": history["train_acc"],
+        "Val loss": history["val_loss"],
+        "Val accuracy": history["val_acc"],
+        "LR": history["lr"],
+        "final": {
+            "Train loss": history["train_loss"][-1],
+            "Train accuracy": history["train_acc"][-1],
+            "Val loss": history["val_loss"][-1],
+            "Val accuracy": history["val_acc"][-1],
+        }
+    }
+
+    return run_record
+
+
+# =============================
+# Main
+# =============================
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    if device.type == "cpu":
+        print("CUDA is unavailable; training will run on CPU.")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+    all_runs: List[Dict[str, Any]] = []
+
+    for model_name in MODEL_NAMES:
+        for optimizer_name in OPTIMIZER_NAMES:
+            for seed in SEEDS:
+                run_record = run_experiment(model_name, optimizer_name, seed, device)
+                all_runs.append(run_record)
+
+                run_file = RUN_DIR / (
+                    f"{DATASET_NAME}_{model_name}_{optimizer_name}_seed{seed}.json"
+                )
+                with open(run_file, "w", encoding="utf-8") as f:
+                    json.dump(run_record, f, ensure_ascii=False, indent=2)
+
+                print(f"Saved run: {run_file}")
+
+    # =============================
+    # Summary trung bình theo combo
+    # =============================
+    grouped = defaultdict(list)
+    for run in all_runs:
+        key = (run["Alpha"], run["Model"], run["Optimizer"])
+        grouped[key].append(run)
+
+    summary = []
+    for (alpha, model_name, optimizer_name), runs in grouped.items():
+        train_loss_curves = np.array([r["Train loss"] for r in runs], dtype=np.float64)
+        train_acc_curves = np.array([r["Train accuracy"] for r in runs], dtype=np.float64)
+        val_loss_curves = np.array([r["Val loss"] for r in runs], dtype=np.float64)
+        val_acc_curves = np.array([r["Val accuracy"] for r in runs], dtype=np.float64)
+        lr_curves = np.array([r["LR"] for r in runs], dtype=np.float64)
+
+        summary.append({
+            "Alpha": alpha,
+            "Model": model_name,
+            "Optimizer": optimizer_name,
+            "Seeds": [r["Seed"] for r in runs],
+            "mean_history": {
+                "train_loss": train_loss_curves.mean(axis=0).tolist(),
+                "train_acc": train_acc_curves.mean(axis=0).tolist(),
+                "val_loss": val_loss_curves.mean(axis=0).tolist(),
+                "val_acc": val_acc_curves.mean(axis=0).tolist(),
+                "lr": lr_curves.mean(axis=0).tolist(),
+            },
+            "std_history": {
+                "train_loss": train_loss_curves.std(axis=0).tolist(),
+                "train_acc": train_acc_curves.std(axis=0).tolist(),
+                "val_loss": val_loss_curves.std(axis=0).tolist(),
+                "val_acc": val_acc_curves.std(axis=0).tolist(),
+                "lr": lr_curves.std(axis=0).tolist(),
+            },
+            "final_mean": {
+                "Train loss": float(np.mean([r["final"]["Train loss"] for r in runs])),
+                "Train accuracy": float(np.mean([r["final"]["Train accuracy"] for r in runs])),
+                "Val loss": float(np.mean([r["final"]["Val loss"] for r in runs])),
+                "Val accuracy": float(np.mean([r["final"]["Val accuracy"] for r in runs])),
+            },
+            "final_std": {
+                "Train loss": float(np.std([r["final"]["Train loss"] for r in runs])),
+                "Train accuracy": float(np.std([r["final"]["Train accuracy"] for r in runs])),
+                "Val loss": float(np.std([r["final"]["Val loss"] for r in runs])),
+                "Val accuracy": float(np.std([r["final"]["Val accuracy"] for r in runs])),
+            },
+        })
+
+    full_output = {
+        "dataset": DATASET_NAME,
+        "num_epoch": NUM_EPOCH,
+        "batch_size": BATCH_SIZE,
+        "alphas": ALPHAS,
+        "models": MODEL_NAMES,
+        "optimizers": OPTIMIZER_NAMES,
+        "seeds": SEEDS,
+        "runs": all_runs,
+        "summary": summary,
+    }
+
+    with open(SUMMARY_PATH, "w", encoding="utf-8") as f:
+        json.dump(full_output, f, ensure_ascii=False, indent=2)
+
+    print(f"\nSaved summary: {SUMMARY_PATH}")
+
 
 if __name__ == "__main__":
-    print("OK")
+    main()
