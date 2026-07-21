@@ -28,10 +28,10 @@ NUM_EPOCH = 200
 BATCH_SIZE = 128
 NUM_WORKERS = 16
 
-ALPHAS = [0.9, 0.999]
+ALPHAS = [0.99, 0.999]
 MODEL_NAMES = ["resnet34"]
 OPTIMIZER_NAMES = ["fosgdmrextra"]
-SEEDS = [0, 1]
+SEEDS = [2]
 
 OUTPUT_DIR = Path("outputs")
 RUN_DIR = OUTPUT_DIR / "runs"
