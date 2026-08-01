@@ -2,7 +2,7 @@
   "Alpha": 0.999,
   "Model": "resnet34",
   "Seed": 1,
-  "Optimizer": "fosgdmrextra",
+  "Optimizer": "fosgdmrextrab",
   "Train loss": [
     1.918141464767456,
     1.5211473726654052,

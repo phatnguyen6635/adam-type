@@ -44,8 +44,8 @@ def fractional_oder_sgd(
 
         buf = momentum_buffer_list[i]
         if buf is None:
-                buf = scaled_grad.detach().clone()
-                momentum_buffer_list[i] = buf
+            buf = scaled_grad.detach().clone()
+            momentum_buffer_list[i] = buf
         else:
             buf.mul_(momentum).add_(scaled_grad)
 
@@ -69,7 +69,7 @@ class FractionalOrderSGDAdaptiveMomentum(Optimizer):
         weight_decay: float = 5e-4,
         fractional_alpha: float = 0.999,
         delta: float = 1e-8,
-        momentum_schedule = compute_momentum,
+        momentum_schedule = None,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")

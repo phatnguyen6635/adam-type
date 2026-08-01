@@ -2,7 +2,7 @@
   "Alpha": 0.999,
   "Model": "densenet121",
   "Seed": 1,
-  "Optimizer": "fosgdmrextra",
+  "Optimizer": "fosgdmrextrac",
   "Train loss": [
     1.7718605304336548,
     1.324098346786499,

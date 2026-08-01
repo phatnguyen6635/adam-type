@@ -13,10 +13,10 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
 
 from torch.optim import SGD
-from fosgd_am import FractionalOrderSGDAdaptiveMomentum
+from fosgd_am_wo_momentum import FractionalOrderSGDAdaptiveMomentum
 from fosgdmr import FractionalOrderSGDMomentum
 from fosgdr import FractionalOrderSGD
-from fosgdmre import FractionalOrderSGDMomentumEnegry
+# from fosgdmrextra import FractionalOrderSGDMomentumEnegry
 
 # =============================
 # Config
@@ -28,9 +28,9 @@ NUM_EPOCH = 200
 BATCH_SIZE = 128
 NUM_WORKERS = 16
 
-ALPHAS = [0.999, 1.001]
-MODEL_NAMES = ["densenet121"]
-OPTIMIZER_NAMES = ["fosgdmre"]
+ALPHAS = [0.9, 0.99, 0.999, 1.001]
+MODEL_NAMES = ["resnet34", "densenet121"]
+OPTIMIZER_NAMES = ["fosgd_am"]
 SEEDS = [0, 1, 2]
 
 OUTPUT_DIR = Path("outputs")
@@ -358,14 +358,14 @@ def main():
                     all_runs.append(run_record)
 
                     run_file = RUN_DIR / (
-                        f"{DATASET_NAME}_{model_name}_{optimizer_name}_alpha{alpha}_seed{seed}.json"
+                        f"{DATASET_NAME}_{model_name}_{optimizer_name}fix_momentum_0.9_alpha{alpha}_seed{seed}.json"
                     )
                     with open(run_file, "w", encoding="utf-8") as f:
                         json.dump(run_record, f, ensure_ascii=False, indent=2)
 
                     print(f"Saved run: {run_file}")
 
-    # =============================
+    # =============================``
     # Summary trung bình theo combo
     # =============================
     grouped = defaultdict(list)
